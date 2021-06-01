@@ -1,0 +1,157 @@
+---
+title: "Manistee River Loop"
+author: "<h3>Brandon Cummings</h3>"
+date: "June 1, 2019"
+output:
+  html_document:
+    highlight: tango
+    number_sections: yes
+    theme: default
+    toc: yes
+    toc_depth: 2
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+---
+# Introduction
+Aside from data science and medical informatics, one of my top interests is the outdoors - hiking, fishing, backpacking, and canoeing are just some of the ways I like to spend my free time. Since a lot of my professional portfolio is under NDA, I thought I would demonstrate some same skills I've to used, say, [build analytics to predict acute decompensation in general ward and COVID-19 patients](https://doi.org/10.2196/25066). While some of my other sample projects cover the use of Python (and associated libraries like keras/TensorFlow, pandas, etc) in more traditional medical informatics contexts, in this document I'd like to demonstrate my use of R in a lighter application.
+
+One of my most recent trips was a joint backpacking/fishing journey to [Great Smoky Mountains National Park](https://www.nps.gov/grsm/index.htm). Over the course of five days, we hiked XXX miles and climbed XXX feet in elevation. Ever the data-nerd, I recorded our trek using the excellent [AllTrails](https://www.alltrails.com/) application. It records latitude, longitude, and elevation at regular time-points and allows the user to download this data in the XML-based GPX file format. It also saves information such as user-defined waypoints.
+
+My objective in this document is to explore this data and to derive latent information that would be useful to a hiker planning a similar route. Statistics such as average speed, net elevation change, and total uphill distance will be calculated, as well as more abstract metrics such as the distribution of our pace, the joint relationship between hill grade and speed, and how our progress changes as a function of cumultative distance. TODO: does cumulative time or distance play a bigger role? 
+
+# Library imports
+```{r echo=T, message=F, warning=F}
+library('plotKML') # read GPX files
+library('geosphere') # distance calculations on sphere
+library('zoo')
+library('ggmap') # make plots on maps
+library('knitr') # Rmd formatting
+library('kableExtra') # Rmd table formatting
+```
+
+# Data I/O
+
+The [AllTrails](https://www.alltrails.com/) application used to trace our journey provides the user with raw GPX files to download. [GPS Exchange (GPS)](https://docs.fileformat.com/gis/gpx/) files are based on XML, meaning that they use tags to denote different data structures within the file. The core elements include: 
+
+* **Tracks:** an ordered list of points describing a path taken using GPS. These are the main subjects of our analysis.  
+* **Routes:** an ordered list of pre-defined points that describe the route taken. For the purposes of this document, routes are not used.  
+* **Waypoints:** these are user-defined points usually associated with metadata such as a comment or link to an image. They are not typically ordered.  
+
+In the case of our GPX files, track elements contain latitude, longitude, elevation, and timestamp information, while the waypoints contain latitude, longitude, and a short comment. 
+
+## Extracting tracks
+
+The `readGPX()` function is part of the `plotKML` library, and parses this the GPX files into an R structure of nested lists. The relevant tracks are then selected and transformed into dataframes, and our multi-day itinerary is concatenated into one dataset.
+
+```{r echo=T, message=F, warning=F}
+# Read GPX Files
+data.1 <- readGPX('./data/2019-06-01.gpx')
+data.2 <- readGPX('./data/2019-06-02.gpx')
+
+# Extract tracks; gather into one dataframe
+data.1$tracks <- data.frame(data.1$tracks[[1]][2])
+data.2$tracks <- data.frame(data.2$tracks)
+colnames(data.1$tracks) <- colnames(data.2$tracks)
+
+data <- rbind(data.1$tracks, data.2$tracks)
+
+# Print first few rows for display
+kable(head(data)) %>%
+  kable_styling(bootstrap_options = 'striped')
+```
+
+## Extracting waypoints
+
+Next, waypoints are extracted in a similar fashion:
+
+```{r echo=T, message=F, warning=F}
+# Gather waypoints
+waypoints <- rbind(data.1$waypoints, data.2$waypoints)
+
+# Print first few waypoints for display
+kable(head(waypoints)) %>%
+  kable_styling(bootstrap_options = 'striped')
+```
+
+# Route visualization
+
+The first thing I wanted to do was to visualize the entire route by aligning it to a map of the area. This was done using `ggmap`, an offshoot of the popular `ggplot` which specializes in using maps. The first step was to query the database of maps using the `get_map()` function. Given a bounding box of coordinates and a type of map, the `get_map()` function can query a variety of open-source map providers (including Google Maps and OpenStreetMap). In this case, I used the terrain map provided by OpenStreetMap.
+
+```{r echo=T, message=F, warning=F}
+# Map lookup
+map <- get_map(location=c(
+    left=min(data$lon) - 0.1*diff(range(data$lon)), 
+    right=max(data$lon) + 0.2*diff(range(data$lon)),
+    top=max(data$lat) + 0.2*diff(range(data$lat)),
+    bottom=min(data$lat)) - 0.1*diff(range(data$lat)),
+  maptype='terrain',
+  source='osm')
+```
+
+After querying the map, the `ggmap()` is used to plot our route on top. It functions in much the same way as `ggplot()` in that a base object is defined, with additional components overlayed. The result is a map containing the underlying topography and route, along with campsites, notable trail features, and other information we noted using waypoints during the hike.
+
+```{r echo=T, message=F, warning=F}
+# Plot map of route
+ggmap(map) + 
+  geom_path(data=data, aes(x=lon, y=lat), color='gray40') + 
+  geom_point(data=waypoints, aes(x=lon, y=lat), color='blue4') +
+  geom_text(data=waypoints, size=2, nudge_x=0.015*diff(range(data$lon)), color='blue4', check_overlap=T, #fontface='bold',
+            aes(x=lon, y=lat, label=tolower(name), hjust='left')) +
+  geom_point(data=data[1,], color='green4', aes(x=lon, y=lat)) + 
+  geom_point(data=data[nrow(data),], color='firebrick3', aes(x=lon, y=lat)) +
+  xlab('Longitude') + ylab('Latitude')
+```
+
+# Exploratory data analysis
+
+After the initial visualization of our route, I wanted to interrogate the data a bit more.
+
+## Descriptive statistics
+
+
+```{r echo=T, messages=F, warning=F}
+# Calculate distances
+data$distances <- distGeo(data[,c('lon', 'lat')])
+data$distances[length(data$distances)] <- 0
+
+# Convert from meters to miles
+data$cum.distance <- cumsum(data$distances)/1609.344 
+total.distance <- sum(data$distances[-length(data$distances)])/1609.344 
+
+# Calculate elevation
+data$ele <- as.numeric(data$ele)
+data$ele.med <- rollmedian(data$ele, 51, na.pad=TRUE)
+```
+
+```{r echo=T, message=F, warning=F}
+# Display table with descriptive statistics
+tbl <- data.frame(
+  total.distance=sprintf('%0.2f miles', total.distance), 
+  max.elevation=sprintf('%0.2f feet', max(data$ele.med, na.rm=T)),
+  min.elevation=sprintf('%0.2f feet', min(data$ele.med, na.rm=T)),
+  total.uphill=sprintf('%0.2f feet', sum(diff(data$ele.med, na.rm=T)[diff(data$ele.med, na.rm=T) > 0], na.rm=T)),
+  total.downhill=sprintf('%0.2f feet', -sum(diff(data$ele.med, na.rm=T)[diff(data$ele.med, na.rm=T) < 0], na.rm=T))
+)
+
+colnames(tbl) <- c('Total Distance', 'Max. Elevation', 'Min. Elevation', 'Total Uphill Distance', 'Total Downhill Distance')
+
+kable(tbl) %>%
+  kable_styling(bootstrap_options = 'striped')
+```
+
+
+
+```{r echo=T, message=F, warning=F}
+ggplot(data=data, aes(x=cum.distance, y=ele)) + 
+  geom_line() + 
+  xlab('Cumulative Distance (miles)') + ylab('Elevation (feet)')
+```
+
+
+
+
+
+
+
+
